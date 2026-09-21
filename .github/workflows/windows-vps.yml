@@ -9,6 +9,10 @@ jobs:
     timeout-minutes: 355
 
     steps:
+
+      # ---------------------------------------
+      # 1. Enable Remote Desktop
+      # ---------------------------------------
       - name: Enable Remote Desktop
         shell: powershell
         run: |
@@ -17,83 +21,155 @@ jobs:
             -Name "fDenyTSConnections" `
             -Value 0
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" `
             -Value 1
 
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Write-Host "Remote Desktop enabled."
+
+      # ---------------------------------------
+      # 2. Create RDP User
+      # ---------------------------------------
       - name: Create RDP User
         shell: powershell
         run: |
-          $password = [System.Web.Security.Membership]::GeneratePassword(20, 4)
+          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
+          
+          $password = -join (1..20 | ForEach-Object {
+            $chars[(Get-Random -Maximum $chars.Length)]
+          })
+
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
 
           New-LocalUser `
             -Name "VPSUser" `
             -Password $secure `
             -AccountNeverExpires `
-            -PasswordNeverExpires
+            -PasswordNeverExpires `
+            -Description "Temporary GitHub Actions RDP user"
 
           Add-LocalGroupMember `
             -Group "Administrators" `
             -Member "VPSUser"
 
-          "RDP_USERNAME=VPSUser" >> $env:GITHUB_ENV
-          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          "RDP_USERNAME=VPSUser" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+          Write-Host "RDP user created."
+
+      # ---------------------------------------
+      # 3. Install Tailscale
+      # ---------------------------------------
       - name: Install Tailscale
         shell: powershell
         run: |
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          Invoke-WebRequest $url -OutFile "$env:TEMP\tailscale.msi"
+          $installer = "$env:TEMP\tailscale.msi"
 
-          Start-Process msiexec.exe `
-            -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" `
+          Write-Host "Downloading Tailscale..."
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $installer
+
+          Write-Host "Installing Tailscale..."
+
+          Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$installer`" /quiet /norestart" `
             -Wait
 
+          Write-Host "Tailscale installed."
+
+      # ---------------------------------------
+      # 4. Connect Tailscale
+      # ---------------------------------------
       - name: Connect Tailscale
         shell: powershell
         env:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
-          & "C:\Program Files\Tailscale\tailscale.exe" up `
+
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            Write-Error "TS_AUTHKEY GitHub Secret is missing."
+            exit 1
+          }
+
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $tailscale)) {
+            Write-Error "Tailscale executable was not found."
+            exit 1
+          }
+
+          Write-Host "Connecting to Tailscale..."
+
+          & $tailscale up `
             --authkey="$env:TS_AUTHKEY" `
             --hostname="github-windows-vps"
 
           Start-Sleep -Seconds 10
 
-          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          $ip = & $tailscale ip -4
 
-          "RDP_IP=$ip" >> $env:GITHUB_ENV
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            Write-Error "Could not get Tailscale IP."
+            exit 1
+          }
 
+          "RDP_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Tailscale connected."
+
+      # ---------------------------------------
+      # 5. Display RDP Information
+      # ---------------------------------------
       - name: Show RDP Information
         shell: powershell
         run: |
+
           Write-Host ""
-          Write-Host "======================================"
-          Write-Host "       WINDOWS VPS IS READY"
-          Write-Host "======================================"
-          Write-Host ""
-          Write-Host "RDP IP:"
-          Write-Host $env:RDP_IP
-          Write-Host ""
-          Write-Host "Username:"
-          Write-Host $env:RDP_USERNAME
-          Write-Host ""
-          Write-Host "Password:"
-          Write-Host $env:RDP_PASSWORD
-          Write-Host ""
-          Write-Host "======================================"
-          Write-Host "Keep this GitHub Action running."
-          Write-Host "======================================"
+          Write-Host "=========================================="
+          Write-Host "          WINDOWS VPS IS READY"
+          Write-Host "=========================================="
           Write-Host ""
 
+          Write-Host "RDP IP:"
+          Write-Host $env:RDP_IP
+
+          Write-Host ""
+
+          Write-Host "Username:"
+          Write-Host $env:RDP_USERNAME
+
+          Write-Host ""
+
+          Write-Host "Password:"
+          Write-Host $env:RDP_PASSWORD
+
+          Write-Host ""
+
+          Write-Host "=========================================="
+          Write-Host "Connect using Windows Remote Desktop:"
+          Write-Host "Win + R -> mstsc"
+          Write-Host "=========================================="
+          Write-Host ""
+
+      # ---------------------------------------
+      # 6. Keep Job Running
+      # ---------------------------------------
       - name: Keep VPS Alive
         shell: powershell
         run: |
+
+          Write-Host "Windows VPS is running."
+
           while ($true) {
-            Write-Host "VPS is running: $(Get-Date)"
+
+            Write-Host "VPS running: $(Get-Date)"
+
             Start-Sleep -Seconds 60
           }
